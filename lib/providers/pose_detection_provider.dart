@@ -11,6 +11,14 @@ class PoseDetectionProvider extends ChangeNotifier {
   List<Pose> _poses = [];
   bool _isDetecting = false;
   final PostureTfLiteClassifier _postureClassifier = PostureTfLiteClassifier();
+  // 보행 감지 및 발목 각도 1초 샘플링용 상태
+  final List<Offset> _rightAnkleTrace = [];
+  static const int _rightAnkleTraceMaxLen = 30; // 최근 프레임 위치 저장
+  DateTime? _lastAnkleSampleAt;
+  double? _ankleAngle1s; // 1초 간격 샘플된 발목 각도
+  // 자세 스무딩용 히스토리
+  final List<String> _postureHistory = [];
+  static const int _postureHistoryMaxLen = 10;
   
   // 분석 결과
   Map<String, dynamic>? _armStretchResult;
@@ -27,6 +35,7 @@ class PoseDetectionProvider extends ChangeNotifier {
   Map<String, dynamic>? get ankleResult => _ankleResult;
   String get currentPosture => _currentPosture;
   double get postureConfidence => _postureConfidence;
+  double? get ankleAngle1s => _ankleAngle1s;
 
   PoseDetectionProvider() {
     _initializePoseDetector();
@@ -38,7 +47,7 @@ class PoseDetectionProvider extends ChangeNotifier {
     _poseDetector = PoseDetector(
       options: PoseDetectorOptions(
         mode: PoseDetectionMode.stream,
-        model: PoseDetectionModel.accurate,
+        model: PoseDetectionModel.base,
       ),
     );
   }
@@ -65,13 +74,13 @@ class PoseDetectionProvider extends ChangeNotifier {
   }
 
   // 실제 Google ML Kit을 사용한 포즈 감지
-  Future<void> detectPoses(CameraImage image) async {
+  Future<void> detectPoses(CameraImage image, InputImageRotation rotation) async {
     if (_isDetecting || _poseDetector == null) return;
 
     _isDetecting = true;
 
     try {
-      final inputImage = _convertCameraImage(image);
+      final inputImage = _convertCameraImage(image, rotation);
       if (inputImage != null) {
         // 실제 Google ML Kit으로 포즈 감지
         _poses = await _poseDetector!.processImage(inputImage);
@@ -97,7 +106,7 @@ class PoseDetectionProvider extends ChangeNotifier {
   }
 
   // 카메라 이미지를 InputImage로 변환
-  InputImage? _convertCameraImage(CameraImage image) {
+  InputImage? _convertCameraImage(CameraImage image, InputImageRotation rotation) {
     try {
       final WriteBuffer allBytes = WriteBuffer();
       for (final Plane plane in image.planes) {
@@ -106,7 +115,7 @@ class PoseDetectionProvider extends ChangeNotifier {
       final bytes = allBytes.done().buffer.asUint8List();
 
       final Size imageSize = Size(image.width.toDouble(), image.height.toDouble());
-      final InputImageRotation imageRotation = InputImageRotation.rotation0deg;
+      final InputImageRotation imageRotation = rotation;
       final InputImageFormat inputImageFormat = InputImageFormat.nv21;
 
       return InputImage.fromBytes(
@@ -237,6 +246,7 @@ class PoseDetectionProvider extends ChangeNotifier {
     if (_poses.isEmpty) return;
 
     final pose = _poses.first;
+    _updateRightAnkleTrace(pose);
     
     // 팔 뻗기 분석
     _armStretchResult = _analyzeArmStretch(pose);
@@ -366,11 +376,20 @@ class PoseDetectionProvider extends ChangeNotifier {
           likelihood: 0.5,
         );
 
+        // 왼발 발목각도: 무릎-발목-발가락 각도
         leftAnkleAngle = _calculateAngle(
           [leftKnee.x, leftKnee.y],
           [leftAnkle.x, leftAnkle.y],
           [foot.x, foot.y],
         );
+
+        // 상세 로깅(최대 1초 간격)
+        final now = DateTime.now();
+        if (_lastAnkleSampleAt == null || now.difference(_lastAnkleSampleAt!).inMilliseconds >= 1000) {
+          debugPrint('[ANKLE][LEFT] A(knee)=(${leftKnee.x.toStringAsFixed(1)}, ${leftKnee.y.toStringAsFixed(1)}), '
+              'B(ankle)=(${leftAnkle.x.toStringAsFixed(1)}, ${leftAnkle.y.toStringAsFixed(1)}), '
+              'C(foot)=(${foot.x.toStringAsFixed(1)}, ${foot.y.toStringAsFixed(1)}) -> angle=${leftAnkleAngle.toStringAsFixed(1)}°');
+        }
       }
 
       if (rightKnee != null && rightAnkle != null) {
@@ -382,17 +401,32 @@ class PoseDetectionProvider extends ChangeNotifier {
           likelihood: 0.5,
         );
 
+        // 오른발 발목각도: 무릎-발목-발가락 각도
         rightAnkleAngle = _calculateAngle(
           [rightKnee.x, rightKnee.y],
           [rightAnkle.x, rightAnkle.y],
           [foot.x, foot.y],
         );
+
+        // 상세 로깅(최대 1초 간격)
+        final now = DateTime.now();
+        if (_lastAnkleSampleAt == null || now.difference(_lastAnkleSampleAt!).inMilliseconds >= 1000) {
+          debugPrint('[ANKLE][RIGHT] A(knee)=(${rightKnee.x.toStringAsFixed(1)}, ${rightKnee.y.toStringAsFixed(1)}), '
+              'B(ankle)=(${rightAnkle.x.toStringAsFixed(1)}, ${rightAnkle.y.toStringAsFixed(1)}), '
+              'C(foot)=(${foot.x.toStringAsFixed(1)}, ${foot.y.toStringAsFixed(1)}) -> angle=${rightAnkleAngle.toStringAsFixed(1)}°');
+        }
       }
 
       if (leftAnkleAngle == null && rightAnkleAngle == null) return null;
 
       final angles = [leftAnkleAngle, rightAnkleAngle].where((a) => a != null).cast<double>().toList();
       final avgAnkleAngle = angles.reduce((a, b) => a + b) / angles.length;
+      // 1초 간격 샘플링 저장
+      final now = DateTime.now();
+      if (_lastAnkleSampleAt == null || now.difference(_lastAnkleSampleAt!).inMilliseconds >= 1000) {
+        _ankleAngle1s = avgAnkleAngle;
+        _lastAnkleSampleAt = now;
+      }
       final isCorrectPosition = avgAnkleAngle > 70 && avgAnkleAngle < 110;
 
       return {
@@ -424,10 +458,22 @@ class PoseDetectionProvider extends ChangeNotifier {
         return {'posture': '알 수 없음', 'confidence': 0.0};
       }
 
-      // 1. 몸통 각도 계산 (어깨-엉덩이 선의 수직축 대비 각도)
+      // 1. 몸통 세로거리 및 기울기 계산
       final avgShoulderY = (leftShoulder.y + rightShoulder.y) / 2;
       final avgHipY = (leftHip.y + rightHip.y) / 2;
       final torsoVerticalDistance = (avgHipY - avgShoulderY).abs();
+      // 수직축 대비 몸통 기울기(0=수직, 90=수평) - 좌/우 평균, 0~90도로 보정
+      double torsoTiltDeg = 0;
+      if (leftShoulder != null && leftHip != null) {
+        torsoTiltDeg = _calculateTorsoAngle(leftShoulder, leftHip);
+      }
+      if (rightShoulder != null && rightHip != null) {
+        final rightTilt = _calculateTorsoAngle(rightShoulder, rightHip);
+        torsoTiltDeg = (torsoTiltDeg + rightTilt) / 2.0;
+      }
+      // 스케일 불변화를 위한 참조값: 어깨 너비
+      final shoulderWidth = (rightShoulder.x - leftShoulder.x).abs();
+      final torsoVsShoulder = shoulderWidth > 0 ? (torsoVerticalDistance / shoulderWidth) : 0.0;
       
       // 2. 무릎 각도 계산
       double? avgKneeAngle;
@@ -455,60 +501,120 @@ class PoseDetectionProvider extends ChangeNotifier {
         avgKneeAngle = kneeAngles.reduce((a, b) => a + b) / kneeAngles.length;
       }
 
-      // 3. 몸통 기울기 계산 (수평 대비)
-      double torsoAngle = 0;
-      if (leftShoulder != null && leftHip != null) {
-        final dx = leftHip.x - leftShoulder.x;
-        final dy = leftHip.y - leftShoulder.y;
-        torsoAngle = (atan2(dy.abs(), dx.abs()) * 180 / pi);
-      }
-
-      // 4. 높이 비율 계산 (어깨와 엉덩이의 상대적 위치)
+      // 3. 높이 비율 계산 (어깨와 엉덩이의 상대적 위치)
       final shoulderHipRatio = avgShoulderY / avgHipY;
       
-      print('[자세분류] 몸통거리: ${torsoVerticalDistance.toStringAsFixed(1)}, 무릎각도: ${avgKneeAngle?.toStringAsFixed(1)}°, 몸통각도: ${torsoAngle.toStringAsFixed(1)}°, 높이비율: ${shoulderHipRatio.toStringAsFixed(2)}');
+      print('[자세분류] 몸통거리: ${torsoVerticalDistance.toStringAsFixed(1)}, 무릎각도: ${avgKneeAngle?.toStringAsFixed(1)}°, '
+          '몸통기울기(수직기준): ${torsoTiltDeg.toStringAsFixed(1)}°, 높이비율: ${shoulderHipRatio.toStringAsFixed(2)}, '
+          '세로/어깨비: ${torsoVsShoulder.toStringAsFixed(2)}');
 
       // 5. 특징 벡터 생성 (모델 입력용)
       final List<double> features = [
         (avgKneeAngle ?? 0.0) / 180.0,               // 0~1 정규화 무릎각
-        (torsoAngle.clamp(0.0, 90.0)) / 90.0,        // 0~1 정규화 몸통각
+        (torsoTiltDeg.clamp(0.0, 90.0)) / 90.0,      // 0~1 정규화 몸통기울기
         (torsoVerticalDistance.clamp(0.0, 200.0)) / 200.0, // 어깨-엉덩이 세로거리
         shoulderHipRatio.clamp(0.0, 2.0),            // 비율값
       ];
 
+      // 보행(걷고있음) 감지: 최근 발목 이동량이 큰 경우(스케일 보정)
+      bool walking = _isWalking(torsoVerticalDistance, shoulderWidth);
+
       // 6. TensorFlow Lite 분류기가 있으면 우선 사용
       if (_postureClassifier.isAvailable) {
         final cls = _postureClassifier.classify(features);
-        final posture = (cls['posture'] as String?) ?? '알 수 없음';
-        final confidence = (cls['confidence'] as double?) ?? 0.0;
-        print('[자세분류:TFLite] $posture (${(confidence * 100).toStringAsFixed(1)}%)');
+        String posture = (cls['posture'] as String?) ?? '알 수 없음';
+        double confidence = (cls['confidence'] as double?) ?? 0.0;
+        if (walking && torsoVerticalDistance > 60 && (avgKneeAngle == null || avgKneeAngle > 150)) {
+          posture = '걷고있음';
+          confidence = max(confidence, 0.6);
+        }
+        posture = _smoothPosture(posture);
         return {'posture': posture, 'confidence': confidence};
       }
 
-      // 7. 분류기 없으면 휴리스틱 폴백
-      if (torsoVerticalDistance < 50 && torsoAngle < 30) {
-        return {'posture': '누워있음', 'confidence': 0.7};
+      // 7. 분류기 없으면 휴리스틱 폴백(개선된 규칙, 스케일 불변)
+      String posture;
+      double confidence = 0.6;
+
+      // 누워있음: 몸통 기울기 큼(>40) 또는 세로/어깨비 매우 작음(<0.35)
+      if (torsoTiltDeg > 40 || torsoVsShoulder < 0.35) {
+        posture = '누워있음';
       }
-      if (avgKneeAngle != null && avgKneeAngle > 160 && torsoVerticalDistance > 80) {
-        return {'posture': '서있음', 'confidence': 0.7};
+      // 서있음: 무릎 펴짐, 세로/어깨비 큼(>0.8), 몸통 기울기 작음(<20)
+      else if ((avgKneeAngle ?? 180) > 160 && torsoVsShoulder > 0.8 && torsoTiltDeg < 20) {
+        posture = walking ? '걷고있음' : '서있음';
       }
-      if (avgKneeAngle != null && avgKneeAngle < 140 && torsoVerticalDistance > 40 && torsoAngle > 45) {
-        return {'posture': '앉아있음', 'confidence': 0.6};
+      // 앉아있음: 무릎 굽힘, 세로/어깨비 중간(>0.5), 몸통 기울기 중간(20~60)
+      else if ((avgKneeAngle ?? 0) < 140 && torsoVsShoulder > 0.5 && torsoTiltDeg >= 20 && torsoTiltDeg <= 60) {
+        posture = '앉아있음';
       }
-      if (shoulderHipRatio > 0.9) {
-        return {'posture': '누워있음', 'confidence': 0.5};
+      // 추가 보조 규칙
+      else if (shoulderHipRatio > 0.9 && torsoTiltDeg > 45) {
+        posture = '누워있음';
+        confidence = 0.5;
       } else if (shoulderHipRatio < 0.6 && (avgKneeAngle == null || avgKneeAngle > 150)) {
-        return {'posture': '서있음', 'confidence': 0.5};
-      } else if (avgKneeAngle != null && avgKneeAngle < 130) {
-        return {'posture': '앉아있음', 'confidence': 0.5};
+        posture = walking ? '걷고있음' : '서있음';
+        confidence = 0.5;
+      } else {
+        // 애매하면 최근 상태 유지 성향
+        posture = _postureHistory.isNotEmpty ? _postureHistory.last : '서있음';
+        confidence = 0.4;
       }
 
-      return {'posture': '서있음', 'confidence': 0.4};
+      posture = _smoothPosture(posture);
+      return {'posture': posture, 'confidence': confidence};
       
     } catch (e) {
       print('자세 분류 오류: $e');
       return {'posture': '알 수 없음', 'confidence': 0.0};
     }
+  }
+
+  String _smoothPosture(String posture) {
+    _postureHistory.add(posture);
+    if (_postureHistory.length > _postureHistoryMaxLen) {
+      _postureHistory.removeAt(0);
+    }
+    // 다수결
+    final Map<String, int> freq = {};
+    for (final p in _postureHistory) {
+      freq[p] = (freq[p] ?? 0) + 1;
+    }
+    String best = posture;
+    int bestCnt = 0;
+    freq.forEach((k, v) {
+      if (v > bestCnt) {
+        best = k;
+        bestCnt = v;
+      }
+    });
+    return best;
+  }
+
+  // 최근 발목 이동량 기록
+  void _updateRightAnkleTrace(Pose pose) {
+    final rightAnkle = _findLandmark(pose, PoseLandmarkType.rightAnkle);
+    if (rightAnkle == null) return;
+    final p = Offset(rightAnkle.x, rightAnkle.y);
+    _rightAnkleTrace.add(p);
+    if (_rightAnkleTrace.length > _rightAnkleTraceMaxLen) {
+      _rightAnkleTrace.removeAt(0);
+    }
+  }
+
+  // 보행 여부 추정: 최근 위치 변화량 합이 임계치 초과
+  bool _isWalking(double torsoVerticalDistance, double shoulderWidth) {
+    if (_rightAnkleTrace.length < 6) return false;
+    double movement = 0.0;
+    for (int i = 1; i < _rightAnkleTrace.length; i++) {
+      movement += (_rightAnkleTrace[i] - _rightAnkleTrace[i - 1]).distance;
+    }
+    // 몸통 세로거리가 매우 작다면(누워있음) 보행으로 보지 않음
+    if (torsoVerticalDistance < 50) return false;
+    // 카메라 거리/해상도 보정: 어깨 폭 기준 정규화 임계
+    final double norm = shoulderWidth > 0 ? movement / shoulderWidth : movement;
+    // 임계치: 정규화 이동량 2.0 이상이면 보행으로 간주
+    return norm > 2.0;
   }
 
   PoseLandmark? _findLandmark(Pose pose, PoseLandmarkType type) {

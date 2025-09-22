@@ -4,6 +4,7 @@ import '../widgets/input_field.dart';
 import '../widgets/primary_button.dart';
 import 'login_screen.dart';
 
+
 class RegisterScreen extends StatefulWidget {
   @override
   _RegisterScreenState createState() => _RegisterScreenState();
@@ -71,7 +72,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                                         );
                                         return;
                                       }
-                                      
+                                      // 회원가입 완료 후 홈으로 이동
                                       Navigator.pushReplacement(
                                         context,
                                         MaterialPageRoute(

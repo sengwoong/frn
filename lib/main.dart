@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:camera/camera.dart';
-import 'screens/home_screen.dart';
+import 'screens/login_screen.dart';
 import 'providers/pose_detection_provider.dart';
 
 List<CameraDescription> cameras = [];
@@ -30,7 +30,7 @@ class MyApp extends StatelessWidget {
           primaryColor: Color(0xFF003A56),
           visualDensity: VisualDensity.adaptivePlatformDensity,
         ),
-        home: HomeScreen(),
+        home: LoginScreen(),
         debugShowCheckedModeBanner: false,
       ),
     );

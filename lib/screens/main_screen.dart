@@ -1,9 +1,7 @@
 import 'package:flutter/material.dart';
 import '../widgets/card_modal.dart';
 import '../widgets/primary_button.dart';
-import 'ankle_measure_screen.dart';
 import 'pose_detection_screen.dart';
-import 'upload_screen.dart';
 
 class MainScreen extends StatelessWidget {
   @override
@@ -36,22 +34,21 @@ class MainScreen extends StatelessWidget {
                           child: Column(
                             children: [
                               // Hero Image Wrap
-                              Expanded(
-                                child: Container(
+                              Container(
+                                width: double.infinity,
+                                margin: EdgeInsets.only(bottom: 12),
+                                child: Container
+                                (
                                   width: double.infinity,
-                                  margin: EdgeInsets.only(bottom: 12),
-                                  child: Container(
-                                    width: double.infinity,
-                                    height: 160,
-                                    decoration: BoxDecoration(
-                                      color: Color(0xFFEAF2F5),
-                                      borderRadius: BorderRadius.circular(12),
-                                    ),
-                                    child: Icon(
-                                      Icons.accessibility_new,
-                                      size: 80,
-                                      color: Color(0xFF003A56),
-                                    ),
+                                  height: 160,
+                                  decoration: BoxDecoration(
+                                    color: Color(0xFFEAF2F5),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Icon(
+                                    Icons.accessibility_new,
+                                    size: 80,
+                                    color: Color(0xFF003A56),
                                   ),
                                 ),
                               ),
@@ -118,12 +115,14 @@ class MainScreen extends StatelessWidget {
                   child: Column(
                     children: [
                       _buildActionButton(
-                        "발목 각도 측정하기",
+                        "발목 각도 및 포즈 측정하기",
                         Color(0xFF003A56),
                         () => Navigator.push(
                           context,
                           MaterialPageRoute(
-                            builder: (context) => AnkleMeasureScreen(),
+                            builder: (context) => PoseDetectionScreen(
+                              detectionType: 'ankle',
+                            ),
                           ),
                         ),
                       ),
